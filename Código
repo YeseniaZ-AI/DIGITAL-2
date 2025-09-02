@@ -1,0 +1,189 @@
+from machine import Pin, mem32
+from micropython import const
+import time, random
+
+
+# ---------------- Configuración ----------------
+led_pins = [2, 4, 5]             # Pines LEDs
+buzzer_pin = 18                  # Pin buzzer activo
+btn_start = Pin(13, Pin.IN, Pin.PULL_DOWN)  # Botón inicio
+btn_modo3 = Pin(14, Pin.IN, Pin.PULL_DOWN)  # Botón modo3
+btn_stop  = Pin(27, Pin.IN, Pin.PULL_DOWN)  # Botón stop juego
+
+# Botones jugador 1
+btns_j1 = [Pin(15, Pin.IN, Pin.PULL_DOWN), 
+           Pin(16, Pin.IN, Pin.PULL_DOWN), 
+           Pin(17, Pin.IN, Pin.PULL_DOWN),
+           Pin(19, Pin.IN, Pin.PULL_DOWN)]  
+
+# Botones jugador 2
+btns_j2 = [Pin(21, Pin.IN, Pin.PULL_DOWN), 
+           Pin(22, Pin.IN, Pin.PULL_DOWN), 
+           Pin(23, Pin.IN, Pin.PULL_DOWN),
+           Pin(25, Pin.IN, Pin.PULL_DOWN)]  
+
+# ---- Buzzer activo (sin PWM) ----
+buzzer = Pin(buzzer_pin, Pin.OUT)
+
+def buzzer_on():                 
+    buzzer.value(1)              # Enciende buzzer activo
+
+def buzzer_off():                
+    buzzer.value(0)              # Apaga buzzer activo
+
+# ---------------- Manejo LEDs con registro ----------------
+GPIO_OUT_REG = const(0x3FF44004)   # Registro GPIO de salida
+
+def led_on(pin):
+    mem32[GPIO_OUT_REG] |= (1 << pin)   # Pone a 1 el bit del pin
+
+def led_off(pin):
+    mem32[GPIO_OUT_REG] &= ~(1 << pin)  # Pone a 0 el bit del pin
+
+def apagar_todos():
+    for p in led_pins:
+        led_off(p)
+    buzzer_off()
+
+# ---------------- Variables de control ----------------
+puntaje = [0, 0]                 # Puntajes jugadores
+modo_juego = 1                   # Modo inicial
+juego_activo = True              # Control bucle
+
+# ---------------- Funciones ----------------
+def estimulo_aleatorio():        
+    return random.randint(0, 3)  # 0-2 LED, 3 buzzer
+
+def antirrebote(boton):          
+    time.sleep_ms(50)            
+    return boton.value()
+
+def esperar_respuesta(objetivo, jugador):  
+    inicio = time.ticks_ms()     
+    while True:                  
+        botones = btns_j1 if jugador == 0 else btns_j2
+        for i, b in enumerate(botones):    
+            if b.value() == 1:             
+                if i == objetivo:          
+                    fin = time.ticks_ms()  
+                    return time.ticks_diff(fin, inicio), True
+                else:                      
+                    return None, False     
+
+def ronda(jugadores):            
+    apagar_todos()               
+    espera = random.randint(1, 10)  
+    time.sleep(espera)           
+
+    salida = estimulo_aleatorio()  
+    if salida < 3:               
+        led_on(led_pins[salida])
+    else:                        
+        buzzer_on()              
+
+    print("¡Reacciona!")          
+    for j in range(jugadores):    
+        tiempo, correcto = esperar_respuesta(salida, j)
+        if correcto:              
+            print("Jugador", j+1, "tiempo:", tiempo, "ms")
+            puntaje[j] += 1       
+        else:                     
+            print("Jugador", j+1, "falló")
+            puntaje[j] -= 1       
+
+    apagar_todos()                
+    time.sleep(1)                 
+
+def mostrar_puntajes():           
+    print("\nPuntajes:")
+    print("Jugador 1:", puntaje[0])
+    print("Jugador 2:", puntaje[1])
+
+# ---------------- Modo 3 Contrarreloj ----------------
+def modo3_contrarreloj():         
+    print("\n*** Modo 3: Contrarreloj 30s ***")
+    tiempo_inicio = time.ticks_ms()   
+    while time.ticks_diff(time.ticks_ms(), tiempo_inicio) < 30000:  
+        salida = estimulo_aleatorio()   
+        if salida < 3:                  
+            led_on(led_pins[salida])
+        else:                           
+            buzzer_on()
+        inicio = time.ticks_ms()        
+
+        responded = False               
+        while not responded and time.ticks_diff(time.ticks_ms(), inicio) < 3000:  
+            for j in range(2):          
+                botones = btns_j1 if j == 0 else btns_j2
+                for i, b in enumerate(botones):
+                    if b.value() == 1:  
+                        if i == salida: 
+                            print("Jugador", j+1, "¡acierto!")
+                            puntaje[j] += 1
+                        else:           
+                            print("Jugador", j+1, "falló")
+                            puntaje[j] -= 1
+                        responded = True
+                        break
+            time.sleep_ms(20)
+
+        apagar_todos()                  
+        time.sleep(random.uniform(0.5, 1.5))  
+
+    print("\n*** Fin de contrarreloj ***")
+    mostrar_puntajes()
+    if puntaje[0] > puntaje[1]:
+        print("Ganador: Jugador 1")
+    elif puntaje[1] > puntaje[0]:
+        print("Ganador: Jugador 2")
+    else:
+        print("Empate")
+
+# ---------------- Interrupciones ----------------
+def activar_modo3(pin):           
+    global modo_juego
+    print("\n*** Modo 3 activado ***")
+    modo_juego = 3
+
+def detener_juego(pin):           
+    global juego_activo
+    print("\n*** Juego detenido por pulsador STOP ***")
+    juego_activo = False
+
+btn_modo3.irq(trigger=Pin.IRQ_RISING, handler=activar_modo3)
+btn_stop.irq(trigger=Pin.IRQ_RISING, handler=detener_juego)
+
+# ---------------- Juego principal ----------------
+print("Seleccione modo:")         
+print("1. Un jugador")
+print("2. Dos jugadores")
+modo_juego = int(input("Ingrese opción: "))
+
+print("Presione botón inicio")    
+while not btn_start.value():      
+    pass
+
+print("Juego iniciado!")          
+while juego_activo:               
+    if modo_juego == 1:           
+        ronda(1)
+    elif modo_juego == 2:         
+        ronda(2)
+    elif modo_juego == 3:         
+        modo3_contrarreloj()      
+        juego_activo = False      
+    if juego_activo:              
+        mostrar_puntajes()        
+    if modo_juego in [1, 2] and juego_activo:  
+        cont = input("¿Otra ronda? (s/n): ")
+        if cont.lower() != "s":   
+            juego_activo = False
+
+print("\nJuego terminado")        
+mostrar_puntajes()                
+if puntaje[0] > puntaje[1]:
+    print("Ganador: Jugador 1")
+elif puntaje[1] > puntaje[0]:
+    print("Ganador: Jugador 2")
+else:
+    print("Empate")
