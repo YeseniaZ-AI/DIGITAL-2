@@ -1,0 +1,103 @@
+from machine import Pin, Timer
+import time, random
+
+#  CONFIGURACIÓN 
+LED_PIN = 2
+SAMPLE_RATE = 250        # Hz típico para EMG
+MOVING_WINDOW = 5
+MEDIAN_WINDOW = 5
+IIR_ALPHA = 0.15
+
+# SETUP 
+led = Pin(LED_PIN, Pin.OUT)
+led.value(0)
+
+# Buffers y variablesmm nnn
+mov_buf = [0]*MOVING_WINDOW
+mov_sum = 0
+mov_pos = 0
+mov_count = 0
+med_buf = []
+iir_prev = None
+
+new_sample = 0
+data_ready = False
+
+#SIMULACIÓN DE EMG 
+def fake_emg():
+    # Señal tipo EMG: ruido + ráfagas de actividad muscular
+    base_noise = random.randint(-80, 80)      # ruido eléctrico
+    burst = 0
+    if random.random() > 0.97:                # ~3% de probabilidad de contracción
+        burst = random.randint(200, 900)      # pico de actividad
+    return max(0, min(4095, 2000 + base_noise + burst))  # rango ADC 12 bits
+
+#  FILTROS 
+def apply_moving(value):
+    global mov_buf, mov_sum, mov_pos, mov_count
+    if mov_count < MOVING_WINDOW:
+        mov_buf[mov_pos] = value
+        mov_sum += value
+        mov_count += 1
+    else:
+        mov_sum -= mov_buf[mov_pos]
+        mov_buf[mov_pos] = value
+        mov_sum += value
+    mov_pos = (mov_pos + 1) % MOVING_WINDOW
+    return mov_sum // mov_count
+
+def apply_median(value):
+    global med_buf
+    med_buf.append(value)
+    if len(med_buf) > MEDIAN_WINDOW:
+        med_buf.pop(0)
+    temp = sorted(med_buf)
+    n = len(temp)
+    if n == 0:
+        return value
+    if n % 2 == 1:
+        return temp[n//2]
+    else:
+        return (temp[n//2 - 1] + temp[n//2]) // 2
+
+def apply_iir(value):
+    global iir_prev
+    if iir_prev is None:
+        iir_prev = value
+        return value
+    iir_prev = int(IIR_ALPHA * value + (1 - IIR_ALPHA) * iir_prev)
+    return iir_prev
+
+#  CALLBACK 
+def sample_cb(timer):
+    global new_sample, data_ready
+    new_sample = fake_emg()   # ← usamos la señal simulada
+    data_ready = True
+
+# INICIO 
+print(" EMG modo automático con filtros en cascada ")
+print("Muestreo: {} Hz".format(SAMPLE_RATE))
+print("Imprimiendo: Crudo, Promedio, Mediana, Exponencial")
+
+timer = Timer(0)
+timer.init(period=int(1000/SAMPLE_RATE), mode=Timer.PERIODIC, callback=sample_cb)
+led.value(1)
+
+#  BUCLE PRINCIPAL
+try:
+    while True:
+        if data_ready:
+            data_ready = False
+            raw = new_sample
+            avg = apply_moving(raw)
+            med = apply_median(avg)
+            iir = apply_iir(med)
+
+            # Imprimir formato CSV (para Serial Plotter)
+            print("{},{},{},{}".format(raw, avg, med, iir))
+        time.sleep_ms(1)
+
+except KeyboardInterrupt:
+    timer.deinit()
+    led.value(0)
+    print(" Adquisición detenida.")
