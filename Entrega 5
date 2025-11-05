@@ -7,12 +7,12 @@ import dht # permite leer temperatura y humedad del sensor DHT
 import time # se usa para manejar tiempos y obtener la hora actual
 
 # --- Datos de WiFi ---
-ssid = "WILLIAN"  # credenciales del WiFi para conectar el ESP32 a internet
-password = "COCO2025"
+ssid = "Yesenia"  # credenciales del WiFi para conectar el ESP32 a internet
+password = "12345678"
 
 # --- Token y chat ID de Telegram ---
-token = "8430427097:AAFsumr2RmVm45G3SG1Mwd4rWOWd6eO-Jj0"   # datos del bot de Telegram para enviar y recibir mensajes
-miID = "8337534522"
+token = "8411946075:AAEEtKVy9YVdNxgRaIXzwrtGFvq0PHq5eQU"   # datos del bot de Telegram para enviar y recibir mensajes
+miID = "6651860477"
 
 # --- Configuración de pines del hardware ---
 buzzer = Pin(25, Pin.OUT)  # Pin de salida para el buzzer (alarma sonora)
@@ -131,7 +131,7 @@ while True:  # Ciclo principal que mantiene el sistema corriendo todo el tiempo
 
         # --- Comando /help ---
         if texto == "/help": # Si el usuario escribe /help, se muestra la lista de comandos
-            bot.send(chat_id,}
+            bot.send(chat_id,
             # Envía por Telegram la lista de comandos que puede usar el usuario
                 "Comandos disponibles:\n"
                 "/status -> Ver estado actual\n"
@@ -301,3 +301,4 @@ while True:  # Ciclo principal que mantiene el sistema corriendo todo el tiempo
         conn.close() # Termina la conexión con el navegador
     except OSError: # Ignora errores si no hay conexión o se interrumpe
         pass
+
