@@ -1,0 +1,303 @@
+from machine import Pin, PWM # se importan las clases para manejar pines y señales PWM del ESP32
+from time import sleep # permite hacer pausas entre acciones
+import network # se usa para conectar el ESP32 al WiFi
+import socket # sirve para crear comunicación entre dispositivos por internet
+import utelegram # se usa para conectar el ESP32 con un bot de Telegram
+import dht # permite leer temperatura y humedad del sensor DHT
+import time # se usa para manejar tiempos y obtener la hora actual
+
+# --- Datos de WiFi ---
+ssid = "WILLIAN"  # credenciales del WiFi para conectar el ESP32 a internet
+password = "COCO2025"
+
+# --- Token y chat ID de Telegram ---
+token = "8430427097:AAFsumr2RmVm45G3SG1Mwd4rWOWd6eO-Jj0"   # datos del bot de Telegram para enviar y recibir mensajes
+miID = "8337534522"
+
+# --- Configuración de pines del hardware ---
+buzzer = Pin(25, Pin.OUT)  # Pin de salida para el buzzer (alarma sonora)
+boton = Pin(26, Pin.IN, Pin.PULL_DOWN)  # Botón físico con resistencia pull-down
+sensor = dht.DHT11(Pin(12))  # Sensor DHT11 conectado al pin 12
+
+# --- Variables de control de alarmas ---
+alarma_temp_activa = True
+alarma_hum_activa = True
+alarma_panic_activa = True
+alarma_temp_sonando = False
+alarma_hum_sonando = False
+alarma_panic_sonando = False  # Nueva variable que indica si la alarma de pánico está sonando
+
+# --- Variable general de estado ---
+alerta = "Todo en rango" # mensaje que muestra si todo está bien o hay una alerta
+
+# --- Función para emitir un pitido (beep) con el buzzer ---
+def beep(frecuencia, duracion):
+    pwm = PWM(buzzer)        # Activa PWM sobre el buzzer
+    pwm.freq(frecuencia)     # Define frecuencia del tono
+    pwm.duty(512)            # Define intensidad (mitad del ciclo)
+    time.sleep_ms(duracion)  # Tiempo de duración del tono
+    pwm.deinit()             # Detiene PWM
+    sleep(0.05)              # Pausa corta entre pitidos
+
+# --- Botón de pánico con antirrebote ---
+ultimo_tiempo = 0  # guarda cuando fue la última pulsación válida
+delay_rebote = 200  # Tiempo mínimo entre pulsaciones (ms)
+evento_pendiente = None
+
+def Evento1(p):
+    """Interrupción del botón con antirrebote"""
+    global evento_pendiente, ultimo_tiempo  # usa/actualiza variables globales del botón
+    ahora = time.ticks_ms()  # tiempo actual en ms (reloj del sistema)
+    if ahora - ultimo_tiempo < delay_rebote: # ¿ocurrió muy pronto desde la última pulsación?
+        return # descarta el evento (rebote)
+    ultimo_tiempo = ahora  # actualiza el momento de la última pulsación válida
+    evento_pendiente = p  # Marca que hubo evento de botón
+
+boton.irq(trigger=Pin.IRQ_FALLING, handler=Evento1)  # Detecta pulsación (borde descendente)
+
+# --- Conexión WiFi ---  # bloque para conectar el ESP32 al WiFi
+print("Conectando a la red WiFi...") #Mensaje que avisa la conexión
+wlan = network.WLAN(network.STA_IF) # se crea la interfaz WiFi en modo estación
+wlan.active(True) # activa el módulo WiFi del ESP32, sin eso no se puede conectar
+wlan.connect(ssid, password) # conecta a la red usando las credenciales
+
+while not wlan.isconnected():  # espera hasta que el WiFi se conecte correctamente
+    print("Conectando...")
+    sleep(1)
+
+# WiFi conectado
+print("Conexion WiFi exitosa") # confirma que el ESP32 ya está conectado al WiFi
+print("Direccion IP:", wlan.ifconfig()[0]) # muestra la IP local asignada al ESP32
+ip_local = wlan.ifconfig()[0] # guarda la IP local en una variable para poderla enviar a Telegram
+print("Porfavor esperar a que se inicie el servidor local, el bot de telegram hara el envio de la IP") 
+#el bot le envia la IP a telegram
+
+# --- Configuración del servidor web local ---  
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(('', 80))          # Escucha en el puerto 80 (HTTP). es el puerto estandar de los servidores web
+s.listen(5)               # Modo escucha, listo para aceptar conexiones entrantes. Acepta hasta 5 conexiones pendientes
+s.settimeout(0.5)         # Timeout para evitar bloqueos largos al esperar conexiones
+
+# --- Inicializar bot de Telegram --- 
+bot = utelegram.ubot(token) # Se crea el bot de Telegram con su token para poder enviar y recibir mensajes
+bot.send(miID, "ESP32 conectado correctamente")
+bot.send(miID, f"Servidor web: http://{ip_local}") # Informa la dirección IP del servidor local para acceder por navegador
+bot.send(miID, # Muestra todos los comandos disponibles para controlar el ESP32 desde Telegram
+        "Comandos disponibles:\n"
+        "/status -> Ver estado actual\n"
+        "/settemp [valor] -> Cambiar umbral de temperatura\n"
+        "/sethum [valor] -> Cambiar umbral de humedad\n"
+        "/silencio_temp -> Apagar alarma temperatura\n"
+        "/silencio_hum -> Apagar alarma humedad\n"
+        "/silencio_panic -> Apagar alarma boton panico\n"
+        "/reset -> Reactivar todas las alarmas\n"
+        "/help -> Volver a mostrar lista de comandos\n"
+)
+
+# --- Cargar página HTML base ---
+try:
+    with open("index.html", "r") as f: # Se carga el archivo HTML que usará el servidor web
+        html_base = f.read() #guarda todo el contenido del HTML dentro de la vble html_base
+except:
+    html_base = "<h1>Error al cargar la pagina HTML</h1>" # Si no se encuentra el archivo HTML, muestra un mensaje de error
+
+# --- Función para generar la página web con los valores actuales ---
+def web_page(temp, hum, alerta, umbral_temp, umbral_hum): 
+    html = html_base
+    # Reemplaza los marcadores del HTML con los datos actuales
+    html = html.replace("{{temp}}", str(temp))
+    html = html.replace("{{hum}}", str(hum))
+    html = html.replace("{{alerta}}", alerta)
+    html = html.replace("{{umbral_temp}}", str(umbral_temp))
+    html = html.replace("{{umbral_hum}}", str(umbral_hum))
+    return html # Retorna el HTML final listo para mostrar en el navegador
+
+# --- Variables iniciales ---
+temp, hum = 0, 0 # Inicia los valores de temperatura y humedad en cero
+ultimo_lectura = time.ticks_ms()  # Guarda el momento de la última lectura del sensor
+# Define los límites de temperatura y humedad que activan las alarmas
+umbral_temp = 30  # Temperatura límite
+umbral_hum  = 70  # Humedad límite
+
+# --- Bucle principal del sistema ---
+while True:  # Ciclo principal que mantiene el sistema corriendo todo el tiempo
+
+    # --- Leer nuevos mensajes de Telegram ---
+    nuevo_mensaje = bot.read_once()  # Revisa si llegó un nuevo mensaje al bot de Telegram
+
+    if nuevo_mensaje: #Si hay mensaje nuevo, se procesa
+        chat_id = nuevo_mensaje['message']['chat']['id']
+        texto = nuevo_mensaje['message'].get('text', '')
+
+        # --- Comando /help ---
+        if texto == "/help": # Si el usuario escribe /help, se muestra la lista de comandos
+            bot.send(chat_id,}
+            # Envía por Telegram la lista de comandos que puede usar el usuario
+                "Comandos disponibles:\n"
+                "/status -> Ver estado actual\n"
+                "/settemp [valor] -> Cambiar umbral de temperatura\n"
+                "/sethum [valor] -> Cambiar umbral de humedad\n"
+                "/silencio_temp -> Apagar alarma temperatura\n"
+                "/silencio_hum -> Apagar alarma humedad\n"
+                "/silencio_panic -> Apagar alarma boton panico\n"
+                "/reset -> Reactivar todas las alarmas\n"
+            )
+
+        # --- Comando /status ---
+        elif texto == "/status": # Si el usuario pide /status, muestra el estado actual de temperatura y humedad
+            print(f"Temp: {temp}°C Hum: {hum}%  Umbral Temp: {umbral_temp}°C  Umbral Hum: {umbral_hum}%")
+            # Muestra en consola los valores actuales (para verlos desde el monitor serie)
+            try:
+                bot.send(chat_id, f"Temp: {temp}°C Hum: {hum}% Umbral Temp: {umbral_temp}C Umbral Hum: {umbral_hum}%")
+                # Envía al usuario los valores actuales del sistema
+            except Exception as e:
+                print("Error al enviar /status:", e)
+                # Si hay error al enviar el mensaje, lo muestra en consola
+
+        # --- Cambiar umbral de temperatura ---
+        elif texto.startswith("/settemp"): # Si el mensaje empieza con /settemp, cambia el umbral de temperatura
+            try:
+                nuevo_valor = int(texto.split()[1]) # Toma el nuevo valor del umbral desde el mensaje y lo convierte a número
+                umbral_temp = nuevo_valor #actualiza el umbral
+                # Confirma el nuevo umbral de temperatura enviando mensaje al usuario
+                alerta = f"Nuevo umbral de temperatura: {umbral_temp}°C"
+                bot.send(chat_id, alerta)
+    
+            except:
+                bot.send(chat_id, "Usa el formato: /settemp 30")
+                # Si el usuario se equivoca en el formato, le muestra cómo debe escribirlo
+
+        # --- Cambiar umbral de humedad ---
+        elif texto.startswith("/sethum"): # Si el mensaje empieza con /sethum, cambia el umbral de humedad
+            try: # Actualiza y confirma el nuevo umbral de humedad
+                nuevo_valor = int(texto.split()[1])
+                umbral_hum = nuevo_valor
+                alerta = f"Nuevo umbral de humedad: {umbral_hum}%"
+                bot.send(chat_id, alerta)
+            except: # Muestra mensaje de ayuda si el comando está mal escrito
+                bot.send(chat_id, "Usa el formato: /sethum 70")
+                
+        # --- Silenciar alarma de temperatura ---
+        elif texto == "/silencio_temp":  # Desactiva la alarma de temperatura  
+            alarma_temp_activa = False #apaga el buzzer si estaba sonando
+            buzzer.off()
+            alerta = "Alarma de temperatura silenciada"
+            bot.send(chat_id, alerta) #aviso por telegram
+
+        # --- Silenciar alarma de humedad ---
+        elif texto == "/silencio_hum":
+            alarma_hum_activa = False
+            buzzer.off()
+            alerta = "Alarma de humedad silenciada"
+            bot.send(chat_id, alerta)
+
+        # --- Silenciar botón de pánico ---
+        elif texto == "/silencio_panic":
+            bot.send(miID, "Alarma de panico desactivada")
+            alarma_panic_activa = False
+            alarma_panic_sonando = False
+            buzzer.off()
+            
+        # --- Reactivar todas las alarmas ---
+        elif texto == "/reset":
+            alarma_temp_activa = True
+            alarma_hum_activa = True
+            alarma_panic_activa = True
+            alerta = "Todas las alarmas reactivadas"
+            bot.send(chat_id, alerta)
+
+    # --- Lectura periódica del sensor DHT11 ---
+    if time.ticks_diff(time.ticks_ms(), ultimo_lectura) > 1000:
+        # Leo el sensor cada segundo para actualizar temperatura y humedad
+        try:
+            sensor.measure()  # Le pido al DHT11 que mida temperatura y humedad
+            temp = sensor.temperature() #guarda la temp actual
+            hum = sensor.humidity() #guarda la hum actual
+        except OSError:
+            temp, hum = 0, 0 # Si falla la lectura, pongo 0 y aviso del error
+            print("Error al leer el DHT11")
+        ultimo_lectura = time.ticks_ms() #actualiza el tiempo de la ultima lectura
+
+    # --- Detección de temperatura alta ---
+    if temp > umbral_temp and alarma_temp_activa: # Si la temperatura supera el límite y la alarma está activa
+        alerta = "Temperatura alta"
+        bot.send(miID, alerta) #aviso por telegram
+        beep(1800, 200)
+        beep(1000, 100)
+        beep(1500, 200)
+        alarma_temp_sonando = True  # Marca que la alarma de temperatura está sonando
+    elif alarma_temp_sonando and temp <= umbral_temp: # Si la temperatura vuelve a la normalidad
+        alerta = "Temperatura normalizada"
+        bot.send(miID, alerta)
+        alarma_temp_sonando = False #detiene el estado de alarma
+
+    # --- Detección de humedad alta ---
+    if hum > umbral_hum and alarma_hum_activa: # Si la humedad supera el límite y la alarma está activa
+        alerta = "Humedad alta"
+        bot.send(miID, alerta)
+        beep(1000, 200)
+        beep(1500, 100)
+        beep(2000, 200)
+        alarma_hum_sonando = True  # Marca que la alarma de humedad está sonando
+    elif alarma_hum_sonando and hum <= umbral_hum: # Si la humedad vuelve a valores normales
+        alerta = "Humedad normalizada"
+        bot.send(miID, alerta)
+        alarma_hum_sonando = False # Detiene el estado de alarma
+
+    # --- Evento de botón de pánico ---
+    if evento_pendiente and alarma_panic_activa and not alarma_panic_sonando:
+        # Si se presionó el botón y la alarma de pánico está activa
+        alerta = "Botón de pánico activado" #msm de alerta
+        bot.send(miID, "Botón de panico activado")
+        alarma_panic_sonando = True # Marca que la alarma está sonando
+        evento_pendiente = None # Limpia el evento (evita que se repita)
+
+    # --- Alarma de pánico activa ---
+    if alarma_panic_sonando and alarma_panic_activa: #si la alarma de panico esta encendida
+        beep(1200, 200)
+        beep(1800, 200)
+        sleep(0.5)
+
+    # --- Si el botón de pánico está desactivado ---
+    if not alarma_panic_activa: # Si la alarma de pánico fue desactivada por comando
+        alarma_panic_sonando = False # Se asegura de que el buzzer no suene
+
+    # --- Servidor Web (atiende solicitudes HTTP desde el navegador) ---
+    try:
+        conn, addr = s.accept() # Acepta una conexión entrante desde un navegador
+        request = conn.recv(512) # Recibe hasta 512 bytes de la solicitud HTTP
+        request = str(request) # Convierte la solicitud a texto para analizarla
+
+        # Acciones desde el panel web
+        if "/silencio_temp" in request: # Si el usuario presiona el botón de silenciar temperatura en la página
+            alarma_temp_activa = False #desactiva la alarma
+            alerta = "Alarma de temperatura silenciada desde Web"
+            bot.send(miID, alerta) #aviso por telegram
+
+        elif "/silencio_hum" in request: # Si se presiona el botón para silenciar humedad
+            alarma_hum_activa = False #desactiva la alarma
+            alerta = "Alarma de humedad silenciada desde Web"
+            bot.send(miID, alerta)
+
+        elif "/silencio_panic" in request:#si se presiona el boton panico
+            alarma_panic_activa = False #desactiva el estado de alarma
+            alarma_panic_sonando = False #detiene cualquier sonido
+            alerta = "Alarma de botón de pánico silenciada desde Web"
+            bot.send(miID, "Botón de panico silenciado desde la Web")
+
+        elif "/reset" in request: # Si se presiona el botón de reiniciar alarmas
+            alarma_temp_activa = True #reactiva las alarmas
+            alarma_hum_activa = True
+            alarma_panic_activa = True
+            alerta = "Todas las alarmas reactivadas desde Web"
+            bot.send(miID, alerta)
+
+        # Envía la página HTML actualizada
+        response = web_page(temp, hum, alerta, umbral_temp, umbral_hum) # Genera la página con los valores actuales
+        conn.send(b'HTTP/1.1 200 OK\n') # Responde al navegador que todo está bien
+        conn.send(b'Content-Type: text/html\n')  # Indica que se enviará contenido HTML
+        conn.send(b'Connection: close\n\n')  # Cierra la conexión después de enviar la página
+        conn.sendall(response.encode()) # Envía el contenido HTML generado
+        conn.close() # Termina la conexión con el navegador
+    except OSError: # Ignora errores si no hay conexión o se interrumpe
+        pass
